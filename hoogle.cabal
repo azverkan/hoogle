@@ -31,6 +31,9 @@ source-repository head
     type:     darcs
     location: http://code.haskell.org/hoogle/
 
+flag downloader
+    description: Enable built in data downloader
+
 library
     hs-source-dirs: src
     default-language: Haskell98
@@ -133,6 +136,10 @@ executable hoogle
 
     if !os(mingw32)
         build-depends: unix
+
+    if flag(downloader)
+        build-depends: HTTP, tar, zlib
+        cpp-options: -DFLAG_downloader
 
     other-modules:
         CmdLine.All

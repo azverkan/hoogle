@@ -1,32 +1,56 @@
-
+{-# LANGUAGE CPP #-}
 module Recipe.Download(download) where
 
 import General.Base
 import General.System
 import Recipe.Type
 
-type Downloader = FilePath -> URL -> String
+#if FLAG_downloader
+import qualified Codec.Archive.Tar as Tar
+import qualified Codec.Compression.GZip as GZip
+import qualified Data.ByteString.Lazy.Char8 as LBS
+import Network.Browser
+import Network.HTTP
+#endif
 
-wget :: Downloader
+type Downloader = FilePath -> URL -> IO Bool
+
+wget :: FilePath -> URL -> String
 wget fp url = "wget -nv " ++ url ++ " --output-document=" ++ fp
-curl :: Downloader
+curl :: FilePath -> URL -> String
 curl fp url = "curl -sSL " ++ url ++ " --output " ++ fp
 
-findDownloader :: IO Downloader
-findDownloader = do
+findExternalDownloader :: IO Downloader
+findExternalDownloader = do
     dl <- liftM2 mplus (check "wget") (check "curl")
     when (isNothing dl) $ error "Could not find downloader, neither curl nor wget are on the $PATH."
-    return $ matchDl (fromJust dl)
+    return $ \fp url -> sys $ matchDl (fromJust dl) fp url
     where matchDl d | "wget" `isInfixOf` d = wget
                     | "curl" `isInfixOf` d = curl
+          sys = fmap (== ExitSuccess) . system
+
+#ifdef FLAG_downloader
+httpGet :: Downloader
+httpGet fp url = do
+    rsp <- liftM snd $ browse $ request $ asLazy $ getRequest url
+    LBS.writeFile fp $ rspBody rsp
+    return True
+    where asLazy r = r { rqBody = LBS.empty }
+#endif
+
+findDownloader :: IO Downloader
+#ifdef FLAG_downloader
+findDownloader = return httpGet
+#else
+findDownloader = findExternalDownloader
+#endif
 
 withDownloader :: CmdLine -> Downloader -> [(FilePath, FilePath, URL)] -> IO ()
 withDownloader opt downloader items =
-    let sys = fmap (== ExitSuccess) . system
-        download (f, f', u) = do
+    let download (f, f', u) = do
             b <- doesFileExist f
             when (not b || redownload opt) $ do
-                res <- sys (downloader f' u)
+                res <- downloader f' u
                 unless res $ do
                     b <- doesFileExist f'
                     when b $ removeFile f'
@@ -70,11 +94,16 @@ extractTarball :: FilePath -> IO ()
 extractTarball out = do
         createDirectoryIfMissing True out
         withDirectory out $ do
+#ifdef FLAG_downloader
+            putStrLn "Extracting tarball... "
+            Tar.unpack "." . Tar.read . GZip.decompress =<< LBS.readFile (".." </> takeFileName out <.> "tar.gz")
+#else
             hasGzip <- check "gzip"
             hasTar  <- check "tar"
             when (any isNothing [hasGzip, hasTar]) $ error "Could not extract tarball(s), could not find either gzip or tar on the $PATH."
             putStrLn "Extracting tarball... "
             system_ $ "gzip --decompress --force .." </> takeFileName out <.> "tar.gz"
             system_ $ "tar -xf .." </> takeFileName out <.> "tar"
+#endif
             putStrLn "Finished extracting tarball"
         writeFile (out <.> "txt") ""
